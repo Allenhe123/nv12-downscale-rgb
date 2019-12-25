@@ -51,6 +51,64 @@ int NV12Scale(uint8 *psrc_buf, int psrc_w, int psrc_h, uint8 *pdst_buf, int pdst
 }
 
 
+// NV12 downscale using whole NV12 and offset
+//@psrc_buf  whole nv12 buffer
+//@psrc_w  nv12 width
+//@psrc_h  nv12 height
+//@offset  offset of each part
+//@rate    rate of height for each part
+//@pdst_buf  dst nv12 buffer
+//@pdst_w    dst width
+//@pdst_h    dst height
+int NV12Scale_optimize(uint8 *psrc_buf,
+                       int psrc_w, int psrc_h,
+                       float offset, float rate,
+                       uint8 *pdst_buf, int pdst_w, int pdst_h,
+                       libyuv::FilterModeEnum pfmode, uint8 *i420_buf1, uint8 *i420_buf2)
+{
+    int psrc_h_new = psrc_h * rate;
+
+    //嵌入式平台如此每次分配反而性能更好一些
+//    uint8 *i420_buf1 = (uint8 *)malloc(static_cast<uint32_t>(psrc_w * psrc_h_new * 1.5));
+//    uint8 *i420_buf2 = (uint8 *)malloc(static_cast<uint32_t>(pdst_w * psrc_h_new * 1.5));
+
+    uint8* psrc_buf_y = psrc_buf + static_cast<uint32_t>(psrc_w * psrc_h * offset);
+    uint8* psrc_buf_uv = psrc_buf + static_cast<uint32_t>(psrc_w * psrc_h + psrc_w * psrc_h * offset * 0.5);
+
+    // NV12_1920x1080xrate -> I420_1920x1080xrate
+    libyuv::NV12ToI420(psrc_buf_y,                        psrc_w,
+                       psrc_buf_uv,                       psrc_w,
+                       &i420_buf1[0],                     psrc_w,
+                       &i420_buf1[psrc_w * psrc_h_new],         psrc_w / 2,
+                       &i420_buf1[psrc_w * psrc_h_new * 5 / 4], psrc_w / 2,
+                       psrc_w, psrc_h_new);
+
+    // I420_1920x1080xrate -> I420_1280x640xrate
+    libyuv::I420Scale(&i420_buf1[0],                       psrc_w,
+                      &i420_buf1[psrc_w * psrc_h_new],         psrc_w / 2,
+                      &i420_buf1[psrc_w * psrc_h_new * 5 / 4], psrc_w / 2,
+                      psrc_w, psrc_h_new,
+                      &i420_buf2[0],                       pdst_w,
+                      &i420_buf2[pdst_w * pdst_h],         pdst_w / 2,
+                      &i420_buf2[pdst_w * pdst_h * 5 / 4], pdst_w / 2,
+                      pdst_w, pdst_h,
+                      pfmode);
+
+    // I420_1280x640xrate -> NV12_1280x640xrate
+    libyuv::I420ToNV12(&i420_buf2[0],                       pdst_w,
+                       &i420_buf2[pdst_w * pdst_h],         pdst_w / 2,
+                       &i420_buf2[pdst_w * pdst_h * 5 / 4], pdst_w / 2,
+                       &pdst_buf[0],                        pdst_w,
+                       &pdst_buf[pdst_w * pdst_h],          pdst_w,
+                       pdst_w,pdst_h);
+
+//    free(i420_buf1);
+//    free(i420_buf2);
+
+    return 0;
+}
+
+
 
 // NV12 downscale whole image
 void downscale()
@@ -211,14 +269,22 @@ void thread_entry1(uint8* src_buf, uint32 src_w, uint32 src_h, float rate_h, uin
     uint8* src_buf1 = (uint8*)malloc(src_w * src_h * rate_h * 1.5);
     uint8* dst_buf1   = (uint8*)malloc(dst_w * dst_h * rate_h * 1.5);
 
+    // 此处分配内存，不必在NV12Scale_optimize内每次都分配和释放，x86平台平均每帧时间可减少1.2ms，
+    // 但是嵌入式500平台反而每帧时间增加0.8ms左右
+    uint8* i420_buf1 = (uint8*)malloc(static_cast<uint32_t>(src_w * src_h * rate_h * 1.5));
+    uint8* i420_buf2 = (uint8*)malloc(static_cast<uint32_t>(src_w * src_h * rate_h * 1.5));
+
     clock_t start1 = clock();
     for (int i=0; i < 10000; i++)
     {
-        memcpy(src_buf1, src_buf, static_cast<uint32>(src_w * src_h * rate_h));
-        memcpy(src_buf1 + static_cast<uint32>(src_w * src_h * rate_h), src_buf + src_w * src_h,
-               static_cast<uint32>(src_w * src_h * rate_h * 0.5));
+//        memcpy(src_buf1, src_buf, static_cast<uint32>(src_w * src_h * rate_h));
+//        memcpy(src_buf1 + static_cast<uint32>(src_w * src_h * rate_h), src_buf + src_w * src_h,
+//               static_cast<uint32>(src_w * src_h * rate_h * 0.5));
 
-        NV12Scale(src_buf1, src_w, src_h * rate_h, dst_buf1, dst_w, dst_h * rate_h, libyuv::kFilterNone);
+//        NV12Scale(src_buf1, src_w, src_h * rate_h, dst_buf1, dst_w, dst_h * rate_h, libyuv::kFilterNone);
+
+        NV12Scale_optimize(src_buf, src_w, src_h, 0, rate_h, dst_buf1, dst_w, dst_h * rate_h, libyuv::kFilterNone, i420_buf1, i420_buf2);
+
         //color convert
         cv::Mat nv12(dst_h * 1.5 * rate_h, dst_w, CV_8UC1, dst_buf1);
         cv::Mat rgb(dst_h * rate_h,  dst_w, CV_8UC3, rgb_out);
@@ -230,6 +296,9 @@ void thread_entry1(uint8* src_buf, uint32 src_w, uint32 src_h, float rate_h, uin
 
     free(src_buf1);
     free(dst_buf1);
+
+    free(i420_buf1);
+    free(i420_buf2);
 }
 
 
@@ -239,15 +308,21 @@ void thread_entry2(uint8* src_buf, uint32 src_w, uint32 src_h, float rate_h1, fl
      uint8* src_buf2 = (uint8*)malloc(src_w * src_h * rate_h2 * 1.5);
      uint8* dst_buf2   = (uint8*)malloc(dst_w * dst_h * rate_h2 * 1.5);
 
+     uint8* i420_buf1 = (uint8*)malloc(static_cast<uint32_t>(src_w * src_h * rate_h2 * 1.5));
+     uint8* i420_buf2 = (uint8*)malloc(static_cast<uint32_t>(src_w * src_h * rate_h2 * 1.5));
+
      clock_t start1 = clock();
      for (int i=0; i < 10000; i++)
      {
-         memcpy(src_buf2, src_buf + static_cast<uint32>(src_w * src_h * rate_h1),  static_cast<uint32>(src_w * src_h * rate_h2));
-         memcpy(src_buf2 + static_cast<uint32>(src_w * src_h * rate_h2),
-                src_buf + src_w * src_h + static_cast<uint32>(src_w * src_h * rate_h1 * 0.5),
-                static_cast<uint32>(src_w * src_h * rate_h2 * 0.5));
+//         memcpy(src_buf2, src_buf + static_cast<uint32>(src_w * src_h * rate_h1),  static_cast<uint32>(src_w * src_h * rate_h2));
+//         memcpy(src_buf2 + static_cast<uint32>(src_w * src_h * rate_h2),
+//                src_buf + src_w * src_h + static_cast<uint32>(src_w * src_h * rate_h1 * 0.5),
+//                static_cast<uint32>(src_w * src_h * rate_h2 * 0.5));
 
-         NV12Scale(src_buf2, src_w, src_h * rate_h2, dst_buf2, dst_w, dst_h * rate_h2, libyuv::kFilterNone);
+//         NV12Scale(src_buf2, src_w, src_h * rate_h2, dst_buf2, dst_w, dst_h * rate_h2, libyuv::kFilterNone);
+
+         NV12Scale_optimize(src_buf, src_w, src_h, rate_h1, rate_h2, dst_buf2, dst_w, dst_h * rate_h2,
+                            libyuv::kFilterNone, i420_buf1, i420_buf2);
 
          //color convert
          cv::Mat nv12(dst_h * 1.5 * rate_h2, dst_w, CV_8UC1, dst_buf2);
@@ -263,6 +338,9 @@ void thread_entry2(uint8* src_buf, uint32 src_w, uint32 src_h, float rate_h1, fl
 
      free(src_buf2);
      free(dst_buf2);
+
+     free(i420_buf1);
+     free(i420_buf2);
 }
 
 // rate_h1 = 0.6 rate_h2 = 0.2 rate_h3 = 0.2
@@ -272,16 +350,23 @@ void thread_entry3(uint8* src_buf, uint32 src_w, uint32 src_h, float rate_h1, fl
     uint8* src_buf3 = (uint8*)malloc(src_w * src_h * rate_h3 * 1.5);
     uint8* dst_buf3   = (uint8*)malloc(dst_w * dst_h * rate_h3 * 1.5);
 
+    uint8* i420_buf1 = (uint8 *)malloc(static_cast<uint32_t>(src_w * src_h * rate_h3 * 1.5));
+    uint8* i420_buf2 = (uint8 *)malloc(static_cast<uint32_t>(src_w * src_h * rate_h3 * 1.5));
+
     clock_t start1 = clock();
 
     for (int i=0; i < 10000; i++)
     {
-        memcpy(src_buf3, src_buf + static_cast<uint32>(src_w * src_h * (rate_h1 + rate_h2)), static_cast<uint32>(src_w * src_h * rate_h3));
-        memcpy(src_buf3 + static_cast<uint32>(src_w * src_h * rate_h3),
-               src_buf + src_w * src_h + static_cast<uint32>(src_w * src_h * (rate_h1 + rate_h2) * 0.5),
-               static_cast<uint32>(src_w * src_h * rate_h3 * 0.5));
+//        memcpy(src_buf3, src_buf + static_cast<uint32>(src_w * src_h * (rate_h1 + rate_h2)), static_cast<uint32>(src_w * src_h * rate_h3));
+//        memcpy(src_buf3 + static_cast<uint32>(src_w * src_h * rate_h3),
+//               src_buf + src_w * src_h + static_cast<uint32>(src_w * src_h * (rate_h1 + rate_h2) * 0.5),
+//               static_cast<uint32>(src_w * src_h * rate_h3 * 0.5));
 
-        NV12Scale(src_buf3, src_w, src_h * rate_h3, dst_buf3, dst_w, dst_h * rate_h3, libyuv::kFilterNone);
+//        NV12Scale(src_buf3, src_w, src_h * rate_h3, dst_buf3, dst_w, dst_h * rate_h3, libyuv::kFilterNone);
+
+        NV12Scale_optimize(src_buf, src_w, src_h, rate_h1 + rate_h2, rate_h3, dst_buf3, dst_w, dst_h * rate_h3,
+                           libyuv::kFilterNone, i420_buf1, i420_buf2);
+
         //color convert
         cv::Mat nv12(dst_h * 1.5 * rate_h3, dst_w, CV_8UC1, dst_buf3);
         cv::Mat rgb(static_cast<uint32>(dst_h * rate_h3),  dst_w, CV_8UC3,
@@ -296,6 +381,9 @@ void thread_entry3(uint8* src_buf, uint32 src_w, uint32 src_h, float rate_h1, fl
 
     free(src_buf3);
     free(dst_buf3);
+
+    free(i420_buf1);
+    free(i420_buf2);
 }
 
 // NV12 downscale

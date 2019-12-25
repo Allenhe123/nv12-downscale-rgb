@@ -9,6 +9,12 @@
 // NV12 downscale impl
 int NV12Scale(uint8 *psrc_buf, int psrc_w, int psrc_h, uint8 *pdst_buf, int pdst_w, int pdst_h, libyuv::FilterModeEnum pfmode);
 
+int NV12Scale_optimize(uint8 *psrc_buf,
+                       int psrc_w, int psrc_h,
+                       float offset, float rate,
+                       uint8 *pdst_buf, int pdst_w, int pdst_h,
+                       libyuv::FilterModeEnum pfmode);
+
 // NV12 downscale whole image
 void downscale();
 
